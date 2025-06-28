@@ -48,21 +48,47 @@ pipeline {
         stage('Update Jira Issue') {
             steps {
                 script {
-                    // Get latest commit message
-                    def commitMessage = bat(script: 'git log -1 --pretty=%B', returnStdout: true).trim()
-                    
-                    // Extract Jira issue key using regex
-                    def match = commitMessage =~ /([A-Z]+-\d+)/
-                    if (match) {
-                        def issueKey = match[0][1]
-                        echo "Found Jira Issue Key: ${issueKey}"
-                        
-                        // Post comment to Jira
+                    def commitMessage = bat(script: 'git log -1 --pretty=%%B', returnStdout: true).trim()
+                    echo "Commit message: ${commitMessage}"
+
+                    def extractJiraKey = { msg ->
+                        def matcher = msg =~ /([A-Z]+-\d+)/
+                        return matcher.find() ? matcher.group(1) : ''
+                    }
+
+                    def issueKey = extractJiraKey(commitMessage)
+                    echo "Found Jira Issue Key: ${issueKey}"
+
+                    if (issueKey) {
                         withCredentials([usernamePassword(credentialsId: 'jira-credentials', usernameVariable: 'JIRA_USER', passwordVariable: 'JIRA_TOKEN')]) {
-                            jiraComment idOrKey: issueKey, comment: "✅ Jenkins Build #${env.BUILD_NUMBER} completed. Docker image pushed to Docker Hub."
+                            jiraAddComment site: 'JiraCloud', idOrKey: issueKey, comment: "✅ Jenkins Build #${env.BUILD_NUMBER} completed. Docker image pushed to Docker Hub."
+                            
+                            def transitions = jiraGetIssueTransitions site: 'JiraCloud', idOrKey: issueKey
+                            echo "Available transitions: ${transitions}"
+                            def doneTransitionId = null
+                            transitions.data.transitions.each { transition ->
+                                echo "Checking transition: ${transition.name} with ID: ${transition.id}"
+                                if (transition.name.toLowerCase().contains('done') || 
+                                    transition.name.toLowerCase().contains('close') || 
+                                    transition.name.toLowerCase().contains('resolve')) {
+                                    doneTransitionId = transition.id
+                                    echo "Found matching transition: ${transition.name} with ID: ${transition.id}"
+                                }
+                            }
+                            
+                            if (doneTransitionId) {
+                                jiraTransitionIssue site: 'JiraCloud', idOrKey: issueKey, input: [
+                                    transition: [
+                                        id: doneTransitionId
+                                    ]
+                                ]
+                                echo "✅ JIRA issue ${issueKey} has been transitioned to Done status."
+                            } else {
+                                echo "⚠️ Could not find a suitable transition to Done status. Available transitions logged above."
+                            }
                         }
                     } else {
-                        echo "⚠️ No Jira issue key found in the latest commit message."
+                        echo "⚠️ No Jira issue key found in the commit message."
                     }
                 }
             }
